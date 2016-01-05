@@ -1,21 +1,27 @@
-// 
-// 
-// 
-
 #include "rfidlog.h"
 
 #include <avr/interrupt.h>
 #include <avr/io.h>
-#include <stdint.h>
 
 #include <util/setbaud.h>
-#include <util/delay.h>
 #include <string.h>
+
 
 #define BV(x)			(1 << x)
 #define setBit(P,B) 	(P |= BV(B))
 #define clearBit(P,B)	(P &= ~BV(B))
 #define toggleBit(P,B)	(P ^= BV(B))
+
+#define USCRB_REG	UCSR1B
+#define UBRRH_REG	UBRR1H
+#define UBRRL_REG	UBRR1L
+#define PRR_REG		PRR1
+#define PRUSART_BIT	PRUSART1
+#define RXCIE_BIT	RXCIE1
+#define RXEN_BIT	RXEN1
+#define TXEN_BIT	TXEN1
+#define UDRIE_BIT	UDRIE1
+#define UDR_REG		UDR1
 
 const char SET_READER_ACTIVE_str[]			= "SRA\r";
 const char SET_FORMAT_HEXADECIMAL_str[]		= "SFH\r";
@@ -25,17 +31,19 @@ const char SET_OUTPUT_MODE_1_str[]			= "SO1\r";
 const char READ_FIRMWARE_VERSION_CODE_str[]	= "VER\r";
 const char READ_LOG_FILE_str[]				= "RLF\r";
 
-int next_ch_idx = 0;
+volatile int next_ch_idx = 0;
 volatile char * rfid_string_to_send_p = NULL;
 
 volatile char rfid_uart_rx_buff[RFID_UART_RX_BUFF_SIZE];
 volatile int  rfid_uart_rx_buff_idx;
-volatile int  rfid_ok = 0;
-volatile int  rfid_tag = 0;
-volatile int  rcv = 0;
 volatile char rfid_tag_str[RFID_UART_RX_BUFF_SIZE];
 
+volatile int  rfid_ok	= 0;
+volatile int  rfid_tag	= 0;
+volatile int  rcv		= 0;
 
+
+/* Initialize the RX buffer */
 void clear_rx_buffer()
 {
 	for (rfid_uart_rx_buff_idx=0;
@@ -47,25 +55,30 @@ void clear_rx_buffer()
 	rfid_uart_rx_buff_idx = 0;
 }
 
+/* Initialize the communication with the RFIDLOG board */
 void rfidlog_uart_init()
 {
-	cli();
-	clearBit(PRR1, PRUSART1);
-	UBRR1H = (unsigned char) (UBRR_VALUE >> 8);
-	UBRR1L = (unsigned char) (UBRR_VALUE);
-	
-	setBit(UCSR1B, RXCIE1); // RX Complete Interrupt Enable
-	setBit(UCSR1B, RXEN1); // Receiver Enable
-	setBit(UCSR1B, TXEN1); // Transmitter Enable
-	
 	clear_rx_buffer();
 	rfid_ok = 0;
 	rfid_tag = 0;
 	
+	cli();
+	
+	clearBit(PRR_REG, PRUSART_BIT);
+	
+	UBRRH_REG = (unsigned char) (UBRR_VALUE >> 8);
+	UBRRL_REG = (unsigned char) (UBRR_VALUE);
+	
+	setBit(USCRB_REG, RXCIE_BIT);	// RX Complete Interrupt Enable
+	setBit(USCRB_REG, RXEN_BIT);	// Receiver Enable
+	setBit(USCRB_REG, TXEN_BIT);	// Transmitter Enable
+	
 	sei();
+	
 	return;
 }
 
+/* Send a string to the UART (interrupt-driven). */
 void rfidlog_send_string(char * str)
 {
 	next_ch_idx = 0;
@@ -73,10 +86,14 @@ void rfidlog_send_string(char * str)
 	{
 		rfid_string_to_send_p = str;
 		// UART Data Register Ready Interrupt Enable
-		setBit(UCSR1B, UDRIE1);
+		setBit(USCRB_REG, UDRIE_BIT);
 	}
 }
 
+/* Send a command to the RFIDLOG board.
+ * Input: the desired RFIDLOG command.
+ * Effect: this function sends the correct string to the RFIDLOG board.
+ */
 void rfidlog_send_command(rfidlog_cmd cmd)
 {
 	
@@ -114,35 +131,18 @@ void rfidlog_send_command(rfidlog_cmd cmd)
 		next_ch_idx = 0;
 		rfid_string_to_send_p = cmd_str_p;
 		// UART Data Register Ready Interrupt Enable
-		setBit(UCSR1B, UDRIE1);
+		setBit(USCRB_REG, UDRIE_BIT);
 	}
 }
 
 
-ISR(USART1_UDRE_vect)
-{
-	if (rfid_string_to_send_p == NULL)
-	{
-		return;
-	}
-	else if (rfid_string_to_send_p[next_ch_idx] == '\0')
-	{
-		clearBit(UCSR1B, UDRIE1);
-		next_ch_idx = 0;
-	}
-	else
-	{
-		UDR1 = rfid_string_to_send_p[next_ch_idx++];
-	}
-}
-
+/* Process the data contained in the RX buffer */
 void rfid_check_received_command()
 {
 	int cntr = 0;
 	char * start = NULL;
 	char ok[] = "OK";
 	
-
 
 	rcv = 1; /* received return or <CR> character flag. */
 	
@@ -166,11 +166,10 @@ void rfid_check_received_command()
 	}
 }
 
+
 ISR(USART1_RX_vect)
 {
-	char ch = UDR1; /* read the received character */
-	int cntr = 0;
-	
+	char ch = UDR_REG; /* read the received character */
 	
 	if (rfid_uart_rx_buff_idx >= RFID_UART_RX_BUFF_SIZE-2)
 	{
@@ -179,21 +178,37 @@ ISR(USART1_RX_vect)
 	}
 	else if (ch == '\n' || ch == (char) 0x0D)
 	{
-		/* If we received the return character or <CR>,
-		 * process the data from the buffer. 
+		/* Each time after a return character or <CR> (carriage return)
+		 * character is received, the RX buffer is processed.
 		 */
 		rfid_check_received_command();
-
-		for (cntr=0; cntr < RFID_UART_RX_BUFF_SIZE-1; cntr++)
-		{
-			rfid_uart_rx_buff[cntr] = '\0';
-		}
-		rfid_uart_rx_buff_idx = 0;
-
+		clear_rx_buffer();
 	}
 	else
 	{
 		/* Store the received character. */
 		rfid_uart_rx_buff[rfid_uart_rx_buff_idx++] = ch;
+	}
+}
+
+
+ISR(USART1_UDRE_vect)
+{
+	if (rfid_string_to_send_p == NULL)
+	{
+		return;
+	}
+	else if (rfid_string_to_send_p[next_ch_idx] == '\0')
+	{
+		/* Reaching the end of the string means that the transmission is done. */
+		clearBit(UCSR1B, UDRIE1); /* Disable interrupt. */
+		
+		/* initialize the next character to send index variable */
+		next_ch_idx = 0;
+	}
+	else
+	{
+		/* Send a byte to the UART and increment the next character to send index variable. */
+		UDR_REG = rfid_string_to_send_p[next_ch_idx++];
 	}
 }

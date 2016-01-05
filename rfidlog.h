@@ -12,6 +12,7 @@
 #define RFID_UART_RX_BUFF_SIZE 40
 #define BAUD 9600
 
+
 #define NUM_ACCEPTED_TAGS 2
 const char accepted_tags[NUM_ACCEPTED_TAGS][32] =
 	{	"0300019501",
